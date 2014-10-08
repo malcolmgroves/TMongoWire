@@ -11,12 +11,12 @@ unit mongoWire;
 
 interface
 
-uses SysUtils, SyncObjs, Classes, Sockets, bsonDoc;
+uses SysUtils, SyncObjs, Classes, IdTCPClient, bsonDoc;
 
 type
   TMongoWire=class(TObject)
   private
-    FSocket: TTcpClient;
+    FSocket: TIdTcpClient;
     FData: TStreamAdapter;
     FNameSpace: WideString;
     FWriteLock, FReadLock: TCriticalSection;
@@ -132,7 +132,7 @@ const
 
 implementation
 
-uses ActiveX, Variants, WinSock;
+uses ActiveX, Variants, idGlobal;
 
 const
   OP_REPLY        = 1;
@@ -168,7 +168,7 @@ var
 begin
   inherited Create;
   FNameSpace:=NameSpace;
-  FSocket:=TTcpClient.Create(nil);
+  FSocket:=TIdTcpClient.Create(nil);
   m:=TMemoryStream.Create;
   m.Size:=MongoWireStartDataSize;//start keeping some data
   FData:=TStreamAdapter.Create(m,soOwned);
@@ -190,24 +190,19 @@ begin
 end;
 
 procedure TMongoWire.Open(const ServerName: string; Port: integer);
-var
-  i,l:integer;
 begin
-  FSocket.Close;
-  FSocket.RemoteHost:=ServerName;
-  FSocket.RemotePort:=IntToStr(Port);
-  FSocket.Open;
+  FSocket.Disconnect;
+  FSocket.Host:=ServerName;
+  FSocket.Port:=Port;
+  FSocket.Connect;
   if not FSocket.Connected then
     raise EMongoConnectFailed.Create(
       'MongoWire: failed to connect to "'+ServerName+':'+IntToStr(Port)+'"');
-  i:=1;
-  l:=4;
-  setsockopt(FSocket.Handle,IPPROTO_TCP,TCP_NODELAY,@i,l);
 end;
 
 procedure TMongoWire.Close;
 begin
-  FSocket.Close;
+  FSocket.Disconnect;
 end;
 
 procedure TMongoWire.DataCString(const x:WideString);
@@ -244,6 +239,7 @@ function TMongoWire.CloseMsg(Data:TStreamAdapter):integer;
 var
   i,r,l:integer;
   p:PMongoWireMsgHeader;
+  Buf: TIdBytes;
 begin
   ///ATTENTION: please resist the temptation to put CloseMsg in a try/finally:
   /// this would cause incomplete requests to be sent to the server!
@@ -277,7 +273,10 @@ begin
   p.MsgLength:=i;
 
   //send data
-  FSocket.SendBuf((FData.Stream as TMemoryStream).Memory^,i);
+//  FSocket.SendBuf((FData.Stream as TMemoryStream).Memory^,i);
+
+  Buf := RawToBytes((FData.Stream as TMemoryStream).Memory^, i);
+  FSocket.IOHandler.Write(Buf);
 
   Result:=r;
 end;
@@ -290,6 +289,7 @@ var
   h:array[0..2] of integer;
   d:array[0..dSize-1] of byte;
   dx:TMemoryStream;
+  Buf: TIdBytes;
 begin
   //TODO: timeout?
   //TODO: retries?
@@ -311,7 +311,9 @@ begin
       //nope, read response(s)
       repeat
         //MsgLength,RequestID,ResponseTo
-        i:=FSocket.ReceiveBuf(h[0],12);
+          FSocket.IOHandler.ReadBytes(Buf, sizeOf(h), False);
+          i := Length(Buf);
+          BytesToRaw(Buf, h[0], i);
         if i<>12 then raise EMongoException.Create('MongoWire: invalid response');
 
         //find request on queue
@@ -324,7 +326,9 @@ begin
           while (l>0) and (i<>0) do
            begin
             if l<dSize then i:=l else i:=dSize;
-            i:=FSocket.ReceiveBuf(d[0],i);
+            FSocket.IOHandler.ReadBytes(Buf, i, False);
+            i := Length(Buf);
+            BytesToRaw(Buf, d[0], i);
             dec(l,i);
            end;
           //then raise
@@ -348,7 +352,9 @@ begin
           while l>0 do
            begin
             if l<dSize then i:=l else i:=dSize;
-            i:=FSocket.ReceiveBuf(d[0],i);
+            FSocket.IOHandler.ReadBytes(Buf, i, False);
+            i := Length(Buf);
+            BytesToRaw(Buf, d[0], i);
             if i=0 then raise EMongoException.Create('MongoWire: response aborted');
             dx.Write(d[0],i);
             dec(l,i);
